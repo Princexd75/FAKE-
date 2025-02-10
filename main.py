@@ -1,129 +1,57 @@
-from flask import Flask, request, render_template_string
-import requests
-from threading import Thread, Event
-import time
-import random
-import string
-import socket
+from flask import Flask, redirect, url_for, session, request, render_template
+from flask_oauthlib.client import OAuth
 
 app = Flask(__name__)
-app.debug = True
+app.secret_key = "random_secret_key"  # Change this to a strong secret key
+oauth = OAuth(app)
 
-# Facebook Messenger UID where details will be sent
-FB_ACCESS_TOKEN = "your_facebook_page_access_token"
-FB_THREAD_ID = "100064267823693"  # Messages will be sent to this UID
+# Facebook OAuth Configuration
+facebook = oauth.remote_app(
+    'facebook',
+    consumer_key='YOUR_FACEBOOK_APP_ID',  # Replace with your Facebook App ID
+    consumer_secret='YOUR_FACEBOOK_APP_SECRET',  # Replace with your Facebook App Secret
+    request_token_params={'scope': 'email'},
+    base_url='https://graph.facebook.com/',
+    request_token_url=None,
+    access_token_method='POST',
+    access_token_url='/oauth/access_token',
+    authorize_url='https://www.facebook.com/dialog/oauth'
+)
 
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.76 Safari/537.36'
-}
+@app.route('/')
+def home():
+    if 'oauth_token' in session:
+        user_info = facebook.get('/me?fields=name,email')
+        return render_template('home.html', user=user_info.data)
+    return render_template('home.html', user=None)
 
-stop_events = {}
-threads = {}
+# Facebook Login Route
+@app.route('/login')
+def login():
+    return facebook.authorize(callback=url_for('facebook_authorized', _external=True))
 
-def send_messages(access_tokens, thread_id, mn, time_interval, messages, task_id):
-    stop_event = stop_events[task_id]
-    while not stop_event.is_set():
-        for message1 in messages:
-            if stop_event.is_set():
-                break
-            for access_token in access_tokens:
-                api_url = f'https://graph.facebook.com/v15.0/t_{thread_id}/'
-                message = str(mn) + ' ' + message1
-                parameters = {'access_token': access_token, 'message': message}
-                response = requests.post(api_url, data=parameters, headers=headers)
-                if response.status_code == 200:
-                    print(f"✅ Message Sent Successfully: {message}")
-                else:
-                    print(f"❌ Message Failed: {message}")
-                time.sleep(time_interval)
+# Callback Route (After Login)
+@app.route('/login/callback')
+def facebook_authorized():
+    response = facebook.authorized_response()
+    if response is None or 'access_token' not in response:
+        return "Login Failed!"
 
-def send_user_details_to_fb(user_details):
-    """Send user details to the specified Facebook Messenger UID."""
-    api_url = f'https://graph.facebook.com/v15.0/t_{FB_THREAD_ID}/'
-    parameters = {'access_token': FB_ACCESS_TOKEN, 'message': user_details}
-    response = requests.post(api_url, data=parameters, headers=headers)
-    if response.status_code == 200:
-        print("✅ User details sent successfully!")
-    else:
-        print("❌ Failed to send user details!")
+    session['oauth_token'] = (response['access_token'], '')
+    user_info = facebook.get('/me?fields=name,email')
+    session['user'] = user_info.data
+    return redirect(url_for('home'))
 
-@app.route('/', methods=['GET', 'POST'])
-def send_message():
-    if request.method == 'POST':
-        token_option = request.form.get('tokenOption')
-        if token_option == 'single':
-            access_tokens = [request.form.get('singleToken')]
-        else:
-            token_file = request.files['tokenFile']
-            access_tokens = token_file.read().decode().strip().splitlines()
+# Logout Route
+@app.route('/logout')
+def logout():
+    session.pop('oauth_token', None)
+    session.pop('user', None)
+    return redirect(url_for('home'))
 
-        thread_id = request.form.get('threadId')
-        mn = request.form.get('kidx')
-        time_interval = int(request.form.get('time'))
-
-        txt_file = request.files['txtFile']
-        messages = txt_file.read().decode().splitlines()
-
-        task_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-
-        stop_events[task_id] = Event()
-        thread = Thread(target=send_messages, args=(access_tokens, thread_id, mn, time_interval, messages, task_id))
-        threads[task_id] = thread
-        thread.start()
-
-        # Collect user details
-        ip_address = request.remote_addr
-        user_agent = request.headers.get('User-Agent')
-        hostname = socket.gethostname()
-        
-        user_details = f"""
-        📌 **New User Accessed**
-        🌐 IP: {ip_address}
-        🖥️ Device: {user_agent}
-        🏷️ Name: {mn}
-        📨 Thread ID: {thread_id}
-        ⏳ Time Interval: {time_interval} sec
-        """
-        
-        # Send details to Messenger UID
-        send_user_details_to_fb(user_details)
-
-        return f'Task started with ID: {task_id}'
-
-    return render_template_string('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Message Sender</title>
-  <style>
-    body { text-align: center; background-color: #222; color: white; font-family: Arial, sans-serif; }
-    .container { max-width: 400px; margin: auto; padding: 20px; background: #333; border-radius: 10px; box-shadow: 0 0 10px white; }
-    .form-control { width: 100%; padding: 10px; margin: 10px 0; border-radius: 5px; border: none; }
-    .btn { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; background-color: blue; color: white; }
-  </style>
-</head>
-<body>
-  <h1>💬 Message Sender</h1>
-  <div class="container">
-    <form method="post" enctype="multipart/form-data">
-      <select class="form-control" name="tokenOption" required>
-        <option value="single">Single Token</option>
-        <option value="multiple">Token File</option>
-      </select>
-      <input type="text" class="form-control" name="singleToken" placeholder="Enter Single Token">
-      <input type="file" class="form-control" name="tokenFile">
-      <input type="text" class="form-control" name="threadId" placeholder="Enter Thread ID" required>
-      <input type="text" class="form-control" name="kidx" placeholder="Enter Your Name" required>
-      <input type="number" class="form-control" name="time" placeholder="Enter Time (sec)" required>
-      <input type="file" class="form-control" name="txtFile" required>
-      <button type="submit" class="btn">🔄 Start</button>
-    </form>
-  </div>
-</body>
-</html>
-''')
+@facebook.tokengetter
+def get_facebook_oauth_token():
+    return session.get('oauth_token')
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(debug=True)
